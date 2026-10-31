@@ -1,0 +1,8 @@
+{
+    "id": "Japanese",
+    "name": "Japanese",
+    "version": "1.0.0",
+    "description": "Japanese translation, block hover hints, native help localization, and cache management for BF2042 Portal",
+    "author": "reni2",
+    "main": "index.js"
+}
