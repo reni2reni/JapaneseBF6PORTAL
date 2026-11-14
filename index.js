@@ -2,12 +2,7 @@
 (function () {
     "use strict";
 
-    const portalApi = (typeof BF2042Portal !== "undefined" ? BF2042Portal : window.BF2042Portal);
-    const plugin = portalApi?.Plugins?.getPlugin?.("Japanese");
-    if (!plugin) {
-        console.error("[Japanese] BF2042 Portal Extensions Plugin SDK is unavailable. Check that the plugin is loaded by Portal Extensions 2.x.");
-        return;
-    }
+    const plugin = BF2042Portal.Plugins.getPlugin("Japanese");
     let observer = null;
 
     function getWorkspace() {
@@ -1186,110 +1181,26 @@
         getCachedTranslation: getJListSelectCachedTranslation
     };
 
-    // BF2042 Portal Extensions v2 context-menu integration.
-    let japaneseMenuRegistered = false;
-    let japaneseMenuAttached = false;
-    let menuAttachObserver = null;
-
-    function collectContextMenus(root) {
-        const found = [];
-        const seen = new Set();
-        function visit(value) {
-            if (!value || (typeof value !== "object" && typeof value !== "function") || seen.has(value)) return;
-            seen.add(value);
-            if (Array.isArray(value)) { value.forEach(visit); return; }
-            if (value instanceof Map || value instanceof Set) { value.forEach(visit); return; }
-            if (Array.isArray(value.options) &&
-                (typeof value.displayText === "string" || typeof value.id === "string")) found.push(value);
-            for (const key of ["registry_", "items_", "items", "registry", "menus", "values_"]) {
-                try { visit(value[key]); } catch (_) { }
+    let isScanning = false;
+    function scan() {
+        if (isScanning) return;
+        isScanning = true;
+        try {
+            const submenus = document.querySelectorAll(".bf6-experience-manager-options-submenu");
+            for (const submenu of submenus) {
+                addTranslationToggleMenu(submenu);
+                addCacheManagementMenu(submenu);
             }
+        } finally {
+            isScanning = false;
         }
-        visit(root);
-        return found;
     }
 
-    function findHostOptionsMenu() {
-        const registry = _Blockly?.ContextMenuRegistry?.registry;
-        if (!registry) return null;
-        return collectContextMenus(registry).find(item =>
-            String(item.displayText || "").replace(/[>\s]+$/g, "").trim().toLowerCase() === "options"
-        ) || null;
-    }
-
-    function attachJapaneseMenuToOptions() {
-        if (japaneseMenuAttached) return true;
-        const optionsMenu = findHostOptionsMenu();
-        if (!optionsMenu || !Array.isArray(optionsMenu.options)) return false;
-        if (!optionsMenu.options.includes("menus.japanesePluginMenu")) {
-            optionsMenu.options.push("menus.japanesePluginMenu");
-        }
-        japaneseMenuAttached = true;
-        console.info("[Japanese] Added Japanese submenu to Options.");
-        return true;
-    }
-
-    function registerJapaneseContextMenu() {
-        if (japaneseMenuRegistered) {
-            attachJapaneseMenuToOptions();
-            return;
-        }
-        const Scope = _Blockly?.ContextMenuRegistry?.ScopeType;
-        if (!Scope || !_Blockly?.ContextMenuRegistry?.registry) return;
-
-        const hostOptions = findHostOptionsMenu();
-        const scope = hostOptions?.scopeType || Scope.WORKSPACE;
-        const menu = plugin.createMenu("japanesePluginMenu", "Japanese", scope);
-        menu.options = [
-            "items.japaneseToggleTranslation",
-            "items.japaneseExportCache",
-            "items.japaneseImportCache",
-            "items.japaneseExportBlockList"
-        ];
-
-        const items = [
-            {
-                id: "japaneseToggleTranslation",
-                displayText: () => translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)",
-                scopeType: scope, weight: 100,
-                preconditionFn: () => "enabled",
-                callback: () => {
-                    translationEnabled = !translationEnabled;
-                    try { localStorage.setItem("selection_list_translation_enabled", String(translationEnabled)); } catch (_) { }
-                    if (!translationEnabled) hideFlyoutTooltip();
-                }
-            },
-            {
-                id: "japaneseExportCache", displayText: "日本語キャッシュを保存 (.json)",
-                scopeType: scope, weight: 101, preconditionFn: () => "enabled",
-                callback: () => exportBlockCacheJson()
-            },
-            {
-                id: "japaneseImportCache", displayText: "日本語キャッシュを読込 (.json)",
-                scopeType: scope, weight: 102, preconditionFn: () => "enabled",
-                callback: () => importBlockCacheJson()
-            },
-            {
-                id: "japaneseExportBlockList", displayText: "ブロック一覧を保存 (.json)",
-                scopeType: scope, weight: 103, preconditionFn: () => "enabled",
-                callback: () => exportToolboxListJson()
-            }
-        ];
-
-        plugin.registerMenu(menu);
-        items.forEach(item => plugin.registerItem(item));
-        japaneseMenuRegistered = true;
-        attachJapaneseMenuToOptions();
-    }
-
-    function startMenuAttachObserver() {
-        if (menuAttachObserver || typeof MutationObserver === "undefined") return;
-        menuAttachObserver = new MutationObserver(() => {
-            if (!japaneseMenuAttached) attachJapaneseMenuToOptions();
-        });
-        menuAttachObserver.observe(document.documentElement || document.body, {
-            childList: true, subtree: true
-        });
+    function startObserver() {
+        if (observer) return;
+        observer = new MutationObserver(scan);
+        observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
+        scan();
     }
 
     plugin.initializeWorkspace = async function () {
@@ -1297,7 +1208,7 @@
         bindFlyoutHoverListener();
         bindNativeTooltipTranslation();
         bindDropdownHoverListener();
-        registerJapaneseContextMenu();
-        startMenuAttachObserver();
+        startObserver();
+        scan();
     };
 })();
