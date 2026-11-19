@@ -381,14 +381,17 @@
         const ws = getWorkspace();
         if (ws) {
             try {
-                const wsBlocks = ws.getAllBlocks ? ws.getAllBlocks(false) : [];
-                blocks.push(...wsBlocks);
+                if (typeof ws.getAllBlocks === "function") {
+                    blocks.push(...ws.getAllBlocks(false));
+                }
             } catch (_) { }
+
+            // 左側フライアウト（通常/水平/拡張フライアウト対応）
             try {
-                const flyout = ws.getFlyout ? ws.getFlyout() : (ws.flyout_ || null);
-                const flyoutWs = flyout?.getWorkspace ? flyout.getWorkspace() : (flyout?.workspace_ || null);
-                if (flyoutWs && flyoutWs.getAllBlocks) {
-                    blocks.push(...flyoutWs.getAllBlocks(false));
+                const flyout = ws.getFlyout ? ws.getFlyout() : (ws.flyout_ || ws.toolbox_?.flyout_);
+                const fWs = flyout?.getWorkspace ? flyout.getWorkspace() : (flyout?.workspace_ || null);
+                if (fWs && typeof fWs.getAllBlocks === "function") {
+                    blocks.push(...fWs.getAllBlocks(false));
                 }
             } catch (_) { }
         }
@@ -405,46 +408,86 @@
             const shouldTranslate = translationEnabled && blockBodyTranslationEnabled;
 
             for (const block of blocks) {
-                if (!block || !block.inputList) continue;
+                if (!block) continue;
                 let blockChanged = false;
 
-                for (const input of block.inputList) {
-                    if (!Array.isArray(input?.fieldRow)) continue;
-                    for (const field of input.fieldRow) {
-                        if (!field) continue;
-
-                        // 1. 原文テキストの退避と現在テキストの取得
-                        if (typeof field._originalPortalText !== "string") {
-                            field._originalPortalText = field.getText ? field.getText() : (field.getValue ? String(field.getValue()) : "");
+                // 1. 全フィールドを走査して書き換え
+                const fields = [];
+                try {
+                    if (Array.isArray(block.inputList)) {
+                        for (const input of block.inputList) {
+                            if (Array.isArray(input.fieldRow)) {
+                                fields.push(...input.fieldRow);
+                            }
                         }
-                        const orig = field._originalPortalText;
-                        if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
+                    }
+                } catch (_) { }
 
-                        // 2. モードに応じた適用テキスト決定
-                        let targetText = orig;
-                        if (shouldTranslate) {
-                            const ja = await resolveBlockFieldText(orig);
-                            if (ja) targetText = ja;
-                        }
+                for (const field of fields) {
+                    if (!field) continue;
 
-                        // 3. テキストの書き換え
-                        const currentText = field.getText ? field.getText() : "";
-                        if (currentText !== targetText) {
+                    // 元テキストを保存
+                    if (typeof field._originalPortalText !== "string") {
+                        const t = field.getText ? field.getText() : (field.getValue ? String(field.getValue()) : "");
+                        field._originalPortalText = normalize(t);
+                    }
+                    const orig = field._originalPortalText;
+                    if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
+
+                    let targetText = orig;
+                    if (shouldTranslate) {
+                        const ja = await resolveBlockFieldText(orig);
+                        if (ja) targetText = ja;
+                    }
+
+                    // 現在の表示と異なる場合のみ更新
+                    const currentText = field.getText ? field.getText() : "";
+                    if (currentText !== targetText) {
+                        try {
                             if (typeof field.setValue === "function" && field.EDITABLE !== true) {
-                                // 静的ラベル要素
-                                try { field.setValue(targetText); } catch (_) { }
-                            } else if (field.textElement_) {
-                                // SVGテキスト要素への直接流し込み
-                                field.textElement_.textContent = targetText;
-                            } else if (typeof field.setText === "function") {
-                                try { field.setText(targetText); } catch (_) { }
+                                field.setValue(targetText);
+                            }
+                            if (typeof field.setText === "function") {
+                                field.setText(targetText);
+                            }
+                            // SVG要素の直接反映
+                            const textEl = field.textElement_ || (field.getSvgRoot ? field.getSvgRoot()?.querySelector("text") : null);
+                            if (textEl) {
+                                textEl.textContent = targetText;
                             }
                             blockChanged = true;
-                        }
+                        } catch (_) { }
                     }
                 }
 
-                // 4. 文字長に応じてブロックSVGを再描画（伸縮・整形）
+                // 2. フィールドで取れなかった静的SVGテキストの直接走査
+                try {
+                    const rootSvg = block.getSvgRoot ? block.getSvgRoot() : null;
+                    if (rootSvg) {
+                        const textNodes = rootSvg.querySelectorAll("text.blocklyText");
+                        for (const node of textNodes) {
+                            // 入力フォームや編集中のものは除外
+                            if (node.closest(".blocklyEditableText:not([style*='pointer-events'])")) continue;
+                            if (typeof node._origSvgText !== "string") {
+                                node._origSvgText = normalize(node.textContent);
+                            }
+                            const orig = node._origSvgText;
+                            if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
+
+                            let target = orig;
+                            if (shouldTranslate) {
+                                const ja = await resolveBlockFieldText(orig);
+                                if (ja) target = ja;
+                            }
+                            if (node.textContent !== target) {
+                                node.textContent = target;
+                                blockChanged = true;
+                            }
+                        }
+                    }
+                } catch (_) { }
+
+                // 3. ブロックSVGの強制再描画・自動伸縮
                 if (blockChanged) {
                     try {
                         if (typeof block.render === "function") {
@@ -455,6 +498,12 @@
                     } catch (_) { }
                 }
             }
+
+            // ワークスペース全体の描画整合
+            try {
+                const ws = getWorkspace();
+                ws?.resizeContents?.();
+            } catch (_) { }
         } finally {
             isTranslatingBlocks = false;
         }
@@ -501,7 +550,7 @@
                 item.textContent = translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)";
                 item.style.color = translationEnabled ? "#61c3ff" : "#8e999b";
                 if (!translationEnabled) hideFlyoutTooltip();
-                scheduleBlockBodyTranslation();
+                updateAllBlocksDisplay();
             }, true);
 
             submenu.appendChild(item);
