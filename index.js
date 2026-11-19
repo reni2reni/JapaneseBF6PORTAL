@@ -104,11 +104,6 @@
     let flyoutTranslationCache = {};
     try { flyoutTranslationCache = JSON.parse(localStorage.getItem(flyoutTranslationCacheKey) || "{}"); } catch (_) { flyoutTranslationCache = {}; }
 
-    // ブロック本文・要素ラベル専用の翻訳キャッシュ
-    const blockTextCacheKey = "blockTextTranslationCache_v1";
-    let blockTextCache = {};
-    try { blockTextCache = JSON.parse(localStorage.getItem(blockTextCacheKey) || "{}"); } catch (_) { blockTextCache = {}; }
-
     async function getTranslatedBlockName(rawText) {
         const key = normalize(rawText);
         if (!key) return "";
@@ -133,48 +128,6 @@
             try { localStorage.setItem(flyoutTranslationCacheKey, JSON.stringify(flyoutTranslationCache)); } catch (_) { }
         }
         return translated || key;
-    }
-
-    // ブロック要素の単語翻訳（キャッシュ＆オンライン）
-    async function resolveBlockFieldText(rawText) {
-        const key = normalize(rawText);
-        if (!key || key.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(key)) return null;
-
-        if (blockTextCache[key] && hasJapanese(blockTextCache[key])) {
-            return blockTextCache[key];
-        }
-        if (TRANSLATION_CORRECTIONS[key] && hasJapanese(TRANSLATION_CORRECTIONS[key])) {
-            return TRANSLATION_CORRECTIONS[key];
-        }
-        if (flyoutTranslationCache[key] && hasJapanese(flyoutTranslationCache[key])) {
-            return flyoutTranslationCache[key];
-        }
-
-        let translated = "";
-        try {
-            if (key.includes("_")) {
-                const parts = key.split("_");
-                const translatedParts = await Promise.all(parts.map(async p => {
-                    if (!p || shouldKeepTranslationToken(p)) return p;
-                    const res = await translateTextBatch(p);
-                    return applyTranslationCorrection(p, res);
-                }));
-                translated = translatedParts.join("_");
-            } else {
-                const spaced = splitCamelCaseForTranslation(key);
-                translated = await translateTextBatch(spaced);
-                translated = applyTranslationCorrection(key, translated);
-            }
-        } catch (_) {
-            return null;
-        }
-
-        if (translated && hasJapanese(translated)) {
-            blockTextCache[key] = translated;
-            try { localStorage.setItem(blockTextCacheKey, JSON.stringify(blockTextCache)); } catch (_) { }
-            return translated;
-        }
-        return null;
     }
 
     // ============================================================
@@ -366,288 +319,45 @@
     // 日本語化機能のON/OFF状態（localStorageで永続保持）
     // ============================================================
     let translationEnabled = localStorage.getItem("selection_list_translation_enabled") !== "false";
-    // ★新設: ブロック本文の直接日本語化ON/OFFフラグ
-    let blockBodyTranslationEnabled = localStorage.getItem("japanese_plugin_block_body_enabled") === "true";
 
     function isEnabled() {
         return translationEnabled;
     }
 
-    // ============================================================
-    // ★ ブロック本体・要素表示の直接日本語化 & SVG自動整形処理
-    // ============================================================
-    function getAllBlocksFromWorkspaceAndFlyout() {
-        const blocks = [];
-        const ws = getWorkspace();
-        if (ws) {
-            try {
-                if (typeof ws.getAllBlocks === "function") {
-                    blocks.push(...ws.getAllBlocks(false));
-                }
-            } catch (_) { }
-
-            // 左側フライアウト（通常/水平/拡張フライアウト対応）
-            try {
-                const flyout = ws.getFlyout ? ws.getFlyout() : (ws.flyout_ || ws.toolbox_?.flyout_);
-                const fWs = flyout?.getWorkspace ? flyout.getWorkspace() : (flyout?.workspace_ || null);
-                if (fWs && typeof fWs.getAllBlocks === "function") {
-                    blocks.push(...fWs.getAllBlocks(false));
-                }
-            } catch (_) { }
-        }
-        return blocks;
-    }
-
-    let isTranslatingBlocks = false;
-    async function updateAllBlocksDisplay() {
-        if (isTranslatingBlocks) return;
-        isTranslatingBlocks = true;
-
-        try {
-            const blocks = getAllBlocksFromWorkspaceAndFlyout();
-            const shouldTranslate = translationEnabled && blockBodyTranslationEnabled;
-
-            for (const block of blocks) {
-                if (!block) continue;
-
-                // ★追加: MOD関連ブロック（本体・定義）を完全に除外
-                const bType = normalize(block.type).toLowerCase();
-                if (
-                    bType.includes("mod") ||
-                    bType.startsWith("custom_") ||
-                    bType.startsWith("extension_") ||
-                    block.isModBlock === true
-                ) {
-                    continue;
-                }
-
-                let blockChanged = false;
-
-                // 1. 全フィールドを走査して書き換え
-                const fields = [];
-                try {
-                    if (Array.isArray(block.inputList)) {
-                        for (const input of block.inputList) {
-                            if (Array.isArray(input.fieldRow)) {
-                                fields.push(...input.fieldRow);
-                            }
-                        }
-                    }
-                } catch (_) { }
-
-                for (const field of fields) {
-                    if (!field) continue;
-
-                    // ★更新: 変数・サブルーチン・MOD関連フィールドを除外
-                    const fieldName = normalize(field.name).toUpperCase();
-                    const fieldCtor = normalize(field.constructor?.name).toLowerCase();
-                    if (
-                        fieldName === "VAR" ||
-                        fieldName === "VARIABLE" ||
-                        fieldName === "SUBROUTINE_NAME" ||
-                        fieldName.includes("MOD") ||
-                        fieldCtor.includes("variable") ||
-                        fieldCtor.includes("mod")
-                    ) {
-                        continue;
-                    }
-
-                    // ★追加: サブルーチン定義ブロック自体の名前フィールドを除外
-                    if (block.type === "subroutineBlock" || block.type === "subroutineInstanceBlock") {
-                        if (fieldName === "SUBROUTINE_NAME" || field.EDITABLE === true) {
-                            continue;
-                        }
-                    }
-
-                    // 元テキストを保存
-                    if (typeof field._originalPortalText !== "string") {
-                        const t = field.getText ? field.getText() : (field.getValue ? String(field.getValue()) : "");
-                        field._originalPortalText = normalize(t);
-                    }
-                    const orig = field._originalPortalText;
-                    if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
-
-                    let targetText = orig;
-                    if (shouldTranslate) {
-                        const ja = await resolveBlockFieldText(orig);
-                        if (ja) targetText = ja;
-                    }
-
-                    // ★追加: VALUE-0（1つ目のリスト）は枠内に収めるため省略処理
-                    if (fieldName === "VALUE-0") {
-                        const MAX_LEN = 11; // 枠内に収まる安全な文字数
-                        if (targetText.length > MAX_LEN) {
-                            targetText = targetText.slice(0, MAX_LEN - 1) + "…";
-                        }
-                    }
-
-                    // 現在の表示と異なる場合のみ更新
-                    const currentText = field.getText ? field.getText() : "";
-                    if (currentText !== targetText) {
-                        try {
-                            if (typeof field.setValue === "function" && field.EDITABLE !== true) {
-                                field.setValue(targetText);
-                            }
-                            if (typeof field.setText === "function") {
-                                field.setText(targetText);
-                            }
-                            const textEl = field.textElement_ || (field.getSvgRoot ? field.getSvgRoot()?.querySelector("text") : null);
-                            if (textEl) {
-                                textEl.textContent = targetText;
-                            }
-
-                            // ★追加: VALUE-1（2つ目のリスト）に合わせてフィールド幅を再計測し、外枠を伸ばす
-                            if (fieldName === "VALUE-1" || fieldName === "VALUE") {
-                                if (typeof field.updateSize_ === "function") {
-                                    field.updateSize_();
-                                } else if (field.size_ && textEl) {
-                                    // SVGテキストの実際の長さを測ってフィールドサイズを更新
-                                    const bBox = textEl.getBBox ? textEl.getBBox() : null;
-                                    if (bBox && bBox.width > 0) {
-                                        field.size_.width = bBox.width + 16; // 余白を加えてブロック枠を伸長
-                                    }
-                                }
-                            }
-
-                            blockChanged = true;
-                        } catch (_) { }
-                    }
-                }
-
-                // 2. フィールドで取れなかった静的SVGテキストの直接走査
-                try {
-                    // ★追加: サブルーチン・変数ブロック自体なら静的SVG走査もスキップ
-                    if (block.type === "subroutineBlock" || block.type === "variableReferenceBlock") {
-                        // スキップ
-                    } else {
-                        const rootSvg = block.getSvgRoot ? block.getSvgRoot() : null;
-                        if (rootSvg) {
-                            const textNodes = rootSvg.querySelectorAll("text.blocklyText");
-                            for (const node of textNodes) {
-                                if (node.closest(".blocklyEditableText:not([style*='pointer-events'])")) continue;
-                                if (typeof node._origSvgText !== "string") {
-                                    node._origSvgText = normalize(node.textContent);
-                                }
-                                const orig = node._origSvgText;
-                                if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
-
-                                let target = orig;
-                                if (shouldTranslate) {
-                                    const ja = await resolveBlockFieldText(orig);
-                                    if (ja) target = ja;
-                                }
-                                if (node.textContent !== target) {
-                                    node.textContent = target;
-                                    blockChanged = true;
-                                }
-                            }
-                        }
-                    }
-                } catch (_) { }
-
-                // 3. ブロックSVGの強制再描画・自動伸縮
-                if (blockChanged) {
-                    try {
-                        if (typeof block.render === "function") {
-                            block.render();
-                        } else if (typeof block.initSvg === "function") {
-                            block.initSvg();
-                        }
-                    } catch (_) { }
-                }
-            }
-
-            // ワークスペース全体の描画整合
-            try {
-                const ws = getWorkspace();
-                ws?.resizeContents?.();
-            } catch (_) { }
-        } finally {
-            isTranslatingBlocks = false;
-        }
-    }
-
-    let blockTranslateTimer = null;
-    function scheduleBlockBodyTranslation() {
-        if (blockTranslateTimer) clearTimeout(blockTranslateTimer);
-        blockTranslateTimer = setTimeout(() => {
-            updateAllBlocksDisplay().catch(() => { });
-        }, 120);
-    }
-
     function addTranslationToggleMenu(submenu) {
-        if (!submenu) return;
+        if (!submenu || submenu.querySelector('[data-japanese-plugin="toggle-translation"]')) return;
 
-        // 1. ポップアップ＆全体日本語化 ON/OFF
-        if (!submenu.querySelector('[data-japanese-plugin="toggle-translation"]')) {
-            const item = document.createElement("div");
-            item.setAttribute("data-japanese-plugin", "toggle-translation");
-            item.className = "selection-list-plugin-menu-item";
-            Object.assign(item.style, {
-                padding: "5px 18px",
-                whiteSpace: "nowrap",
-                background: "rgb(22, 29, 30)",
-                color: translationEnabled ? "#61c3ff" : "#8e999b",
-                cursor: "pointer",
-                fontSize: "15px",
-                lineHeight: "1.3",
-                borderTop: "1px solid #3a4648",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center"
-            });
+        const item = document.createElement("div");
+        item.setAttribute("data-japanese-plugin", "toggle-translation");
+        item.className = "selection-list-plugin-menu-item";
+        Object.assign(item.style, {
+            padding: "5px 18px",
+            whiteSpace: "nowrap",
+            background: "rgb(22, 29, 30)",
+            color: translationEnabled ? "#61c3ff" : "#8e999b",
+            cursor: "pointer",
+            fontSize: "15px",
+            lineHeight: "1.3",
+            borderTop: "1px solid #3a4648",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center"
+        });
+        item.textContent = translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)";
+
+        item.addEventListener("mouseenter", () => item.style.background = "rgb(48, 60, 62)");
+        item.addEventListener("mouseleave", () => item.style.background = "rgb(22, 29, 30)");
+        item.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            translationEnabled = !translationEnabled;
+            localStorage.setItem("selection_list_translation_enabled", String(translationEnabled));
             item.textContent = translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)";
+            item.style.color = translationEnabled ? "#61c3ff" : "#8e999b";
+            if (!translationEnabled) hideFlyoutTooltip();
+        }, true);
 
-            item.addEventListener("mouseenter", () => item.style.background = "rgb(48, 60, 62)");
-            item.addEventListener("mouseleave", () => item.style.background = "rgb(22, 29, 30)");
-            item.addEventListener("click", event => {
-                event.preventDefault();
-                event.stopPropagation();
-                translationEnabled = !translationEnabled;
-                localStorage.setItem("selection_list_translation_enabled", String(translationEnabled));
-                item.textContent = translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)";
-                item.style.color = translationEnabled ? "#61c3ff" : "#8e999b";
-                if (!translationEnabled) hideFlyoutTooltip();
-                updateAllBlocksDisplay();
-            }, true);
-
-            submenu.appendChild(item);
-        }
-
-        // 2. ★新設: ブロック本文表示の日本語化 ON/OFF
-        if (!submenu.querySelector('[data-japanese-plugin="toggle-block-body-translation"]')) {
-            const bodyItem = document.createElement("div");
-            bodyItem.setAttribute("data-japanese-plugin", "toggle-block-body-translation");
-            bodyItem.className = "selection-list-plugin-menu-item";
-            Object.assign(bodyItem.style, {
-                padding: "5px 18px",
-                whiteSpace: "nowrap",
-                background: "rgb(22, 29, 30)",
-                color: blockBodyTranslationEnabled ? "#26d99e" : "#8e999b",
-                cursor: "pointer",
-                fontSize: "15px",
-                lineHeight: "1.3",
-                borderTop: "1px solid #3a4648",
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center"
-            });
-            bodyItem.textContent = blockBodyTranslationEnabled ? "ブロック表示の日本語化: ON" : "ブロック表示の日本語化: OFF";
-
-            bodyItem.addEventListener("mouseenter", () => bodyItem.style.background = "rgb(48, 60, 62)");
-            bodyItem.addEventListener("mouseleave", () => bodyItem.style.background = "rgb(22, 29, 30)");
-            bodyItem.addEventListener("click", event => {
-                event.preventDefault();
-                event.stopPropagation();
-                blockBodyTranslationEnabled = !blockBodyTranslationEnabled;
-                localStorage.setItem("japanese_plugin_block_body_enabled", String(blockBodyTranslationEnabled));
-                bodyItem.textContent = blockBodyTranslationEnabled ? "ブロック表示の日本語化: ON" : "ブロック表示の日本語化: OFF";
-                bodyItem.style.color = blockBodyTranslationEnabled ? "#26d99e" : "#8e999b";
-                scheduleBlockBodyTranslation();
-            }, true);
-
-            submenu.appendChild(bodyItem);
-        }
+        submenu.appendChild(item);
     }
 
     function menuItem(label, onClick) {
@@ -680,10 +390,9 @@
     // 日本語キャッシュの保存 (エクスポート) & 読込 (インポート) & ブロック一覧
     // ============================================================
     function exportBlockCacheJson() {
-        const combined = { ...flyoutTranslationCache, ...blockTextCache };
         const sorted = {};
-        Object.keys(combined).sort().forEach(k => {
-            sorted[k] = combined[k];
+        Object.keys(flyoutTranslationCache).sort().forEach(k => {
+            sorted[k] = flyoutTranslationCache[k];
         });
         const jsonText = JSON.stringify(sorted, null, 2);
         const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
@@ -715,13 +424,10 @@
                     for (const [k, v] of Object.entries(data)) {
                         if (typeof v === "string" && v.trim()) {
                             flyoutTranslationCache[normalize(k)] = v.trim();
-                            blockTextCache[normalize(k)] = v.trim();
                             count++;
                         }
                     }
                     localStorage.setItem(flyoutTranslationCacheKey, JSON.stringify(flyoutTranslationCache));
-                    localStorage.setItem(blockTextCacheKey, JSON.stringify(blockTextCache));
-                    scheduleBlockBodyTranslation();
                     alert(`日本語キャッシュ（${count}件）を正常に読み込みました！即座に反映されます。`);
                 } catch (_) {
                     alert("JSONファイルの形式が正しくありません。");
@@ -1325,10 +1031,6 @@
             return TRANSLATION_CORRECTIONS[key];
         }
 
-        if (blockTextCache[key] && hasJapanese(blockTextCache[key])) {
-            return blockTextCache[key];
-        }
-
         if (flyoutTranslationCache[key] && hasJapanese(flyoutTranslationCache[key])) {
             return flyoutTranslationCache[key];
         }
@@ -1488,9 +1190,6 @@
             for (const submenu of submenus) {
                 addTranslationToggleMenu(submenu);
                 addCacheManagementMenu(submenu);
-            }
-            if (blockBodyTranslationEnabled) {
-                scheduleBlockBodyTranslation();
             }
         } finally {
             isScanning = false;
