@@ -104,6 +104,11 @@
     let flyoutTranslationCache = {};
     try { flyoutTranslationCache = JSON.parse(localStorage.getItem(flyoutTranslationCacheKey) || "{}"); } catch (_) { flyoutTranslationCache = {}; }
 
+    // ブロック本文・要素ラベル専用の翻訳キャッシュ
+    const blockTextCacheKey = "blockTextTranslationCache_v1";
+    let blockTextCache = {};
+    try { blockTextCache = JSON.parse(localStorage.getItem(blockTextCacheKey) || "{}"); } catch (_) { blockTextCache = {}; }
+
     async function getTranslatedBlockName(rawText) {
         const key = normalize(rawText);
         if (!key) return "";
@@ -128,6 +133,48 @@
             try { localStorage.setItem(flyoutTranslationCacheKey, JSON.stringify(flyoutTranslationCache)); } catch (_) { }
         }
         return translated || key;
+    }
+
+    // ブロック要素の単語翻訳（キャッシュ＆オンライン）
+    async function resolveBlockFieldText(rawText) {
+        const key = normalize(rawText);
+        if (!key || key.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(key)) return null;
+
+        if (blockTextCache[key] && hasJapanese(blockTextCache[key])) {
+            return blockTextCache[key];
+        }
+        if (TRANSLATION_CORRECTIONS[key] && hasJapanese(TRANSLATION_CORRECTIONS[key])) {
+            return TRANSLATION_CORRECTIONS[key];
+        }
+        if (flyoutTranslationCache[key] && hasJapanese(flyoutTranslationCache[key])) {
+            return flyoutTranslationCache[key];
+        }
+
+        let translated = "";
+        try {
+            if (key.includes("_")) {
+                const parts = key.split("_");
+                const translatedParts = await Promise.all(parts.map(async p => {
+                    if (!p || shouldKeepTranslationToken(p)) return p;
+                    const res = await translateTextBatch(p);
+                    return applyTranslationCorrection(p, res);
+                }));
+                translated = translatedParts.join("_");
+            } else {
+                const spaced = splitCamelCaseForTranslation(key);
+                translated = await translateTextBatch(spaced);
+                translated = applyTranslationCorrection(key, translated);
+            }
+        } catch (_) {
+            return null;
+        }
+
+        if (translated && hasJapanese(translated)) {
+            blockTextCache[key] = translated;
+            try { localStorage.setItem(blockTextCacheKey, JSON.stringify(blockTextCache)); } catch (_) { }
+            return translated;
+        }
+        return null;
     }
 
     // ============================================================
@@ -319,45 +366,181 @@
     // 日本語化機能のON/OFF状態（localStorageで永続保持）
     // ============================================================
     let translationEnabled = localStorage.getItem("selection_list_translation_enabled") !== "false";
+    // ★新設: ブロック本文の直接日本語化ON/OFFフラグ
+    let blockBodyTranslationEnabled = localStorage.getItem("japanese_plugin_block_body_enabled") === "true";
 
     function isEnabled() {
         return translationEnabled;
     }
 
+    // ============================================================
+    // ★ ブロック本体・要素表示の直接日本語化 & SVG自動整形処理
+    // ============================================================
+    function getAllBlocksFromWorkspaceAndFlyout() {
+        const blocks = [];
+        const ws = getWorkspace();
+        if (ws) {
+            try {
+                const wsBlocks = ws.getAllBlocks ? ws.getAllBlocks(false) : [];
+                blocks.push(...wsBlocks);
+            } catch (_) { }
+            try {
+                const flyout = ws.getFlyout ? ws.getFlyout() : (ws.flyout_ || null);
+                const flyoutWs = flyout?.getWorkspace ? flyout.getWorkspace() : (flyout?.workspace_ || null);
+                if (flyoutWs && flyoutWs.getAllBlocks) {
+                    blocks.push(...flyoutWs.getAllBlocks(false));
+                }
+            } catch (_) { }
+        }
+        return blocks;
+    }
+
+    let isTranslatingBlocks = false;
+    async function updateAllBlocksDisplay() {
+        if (isTranslatingBlocks) return;
+        isTranslatingBlocks = true;
+
+        try {
+            const blocks = getAllBlocksFromWorkspaceAndFlyout();
+            const shouldTranslate = translationEnabled && blockBodyTranslationEnabled;
+
+            for (const block of blocks) {
+                if (!block || !block.inputList) continue;
+                let blockChanged = false;
+
+                for (const input of block.inputList) {
+                    if (!Array.isArray(input?.fieldRow)) continue;
+                    for (const field of input.fieldRow) {
+                        if (!field) continue;
+
+                        // 1. 原文テキストの退避と現在テキストの取得
+                        if (typeof field._originalPortalText !== "string") {
+                            field._originalPortalText = field.getText ? field.getText() : (field.getValue ? String(field.getValue()) : "");
+                        }
+                        const orig = field._originalPortalText;
+                        if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
+
+                        // 2. モードに応じた適用テキスト決定
+                        let targetText = orig;
+                        if (shouldTranslate) {
+                            const ja = await resolveBlockFieldText(orig);
+                            if (ja) targetText = ja;
+                        }
+
+                        // 3. テキストの書き換え
+                        const currentText = field.getText ? field.getText() : "";
+                        if (currentText !== targetText) {
+                            if (typeof field.setValue === "function" && field.EDITABLE !== true) {
+                                // 静的ラベル要素
+                                try { field.setValue(targetText); } catch (_) { }
+                            } else if (field.textElement_) {
+                                // SVGテキスト要素への直接流し込み
+                                field.textElement_.textContent = targetText;
+                            } else if (typeof field.setText === "function") {
+                                try { field.setText(targetText); } catch (_) { }
+                            }
+                            blockChanged = true;
+                        }
+                    }
+                }
+
+                // 4. 文字長に応じてブロックSVGを再描画（伸縮・整形）
+                if (blockChanged) {
+                    try {
+                        if (typeof block.render === "function") {
+                            block.render();
+                        } else if (typeof block.initSvg === "function") {
+                            block.initSvg();
+                        }
+                    } catch (_) { }
+                }
+            }
+        } finally {
+            isTranslatingBlocks = false;
+        }
+    }
+
+    let blockTranslateTimer = null;
+    function scheduleBlockBodyTranslation() {
+        if (blockTranslateTimer) clearTimeout(blockTranslateTimer);
+        blockTranslateTimer = setTimeout(() => {
+            updateAllBlocksDisplay().catch(() => { });
+        }, 120);
+    }
+
     function addTranslationToggleMenu(submenu) {
-        if (!submenu || submenu.querySelector('[data-japanese-plugin="toggle-translation"]')) return;
+        if (!submenu) return;
 
-        const item = document.createElement("div");
-        item.setAttribute("data-japanese-plugin", "toggle-translation");
-        item.className = "selection-list-plugin-menu-item";
-        Object.assign(item.style, {
-            padding: "5px 18px",
-            whiteSpace: "nowrap",
-            background: "rgb(22, 29, 30)",
-            color: translationEnabled ? "#61c3ff" : "#8e999b",
-            cursor: "pointer",
-            fontSize: "15px",
-            lineHeight: "1.3",
-            borderTop: "1px solid #3a4648",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center"
-        });
-        item.textContent = translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)";
-
-        item.addEventListener("mouseenter", () => item.style.background = "rgb(48, 60, 62)");
-        item.addEventListener("mouseleave", () => item.style.background = "rgb(22, 29, 30)");
-        item.addEventListener("click", event => {
-            event.preventDefault();
-            event.stopPropagation();
-            translationEnabled = !translationEnabled;
-            localStorage.setItem("selection_list_translation_enabled", String(translationEnabled));
+        // 1. ポップアップ＆全体日本語化 ON/OFF
+        if (!submenu.querySelector('[data-japanese-plugin="toggle-translation"]')) {
+            const item = document.createElement("div");
+            item.setAttribute("data-japanese-plugin", "toggle-translation");
+            item.className = "selection-list-plugin-menu-item";
+            Object.assign(item.style, {
+                padding: "5px 18px",
+                whiteSpace: "nowrap",
+                background: "rgb(22, 29, 30)",
+                color: translationEnabled ? "#61c3ff" : "#8e999b",
+                cursor: "pointer",
+                fontSize: "15px",
+                lineHeight: "1.3",
+                borderTop: "1px solid #3a4648",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center"
+            });
             item.textContent = translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)";
-            item.style.color = translationEnabled ? "#61c3ff" : "#8e999b";
-            if (!translationEnabled) hideFlyoutTooltip();
-        }, true);
 
-        submenu.appendChild(item);
+            item.addEventListener("mouseenter", () => item.style.background = "rgb(48, 60, 62)");
+            item.addEventListener("mouseleave", () => item.style.background = "rgb(22, 29, 30)");
+            item.addEventListener("click", event => {
+                event.preventDefault();
+                event.stopPropagation();
+                translationEnabled = !translationEnabled;
+                localStorage.setItem("selection_list_translation_enabled", String(translationEnabled));
+                item.textContent = translationEnabled ? "日本語化: ON (無効化)" : "日本語化: OFF (有効化)";
+                item.style.color = translationEnabled ? "#61c3ff" : "#8e999b";
+                if (!translationEnabled) hideFlyoutTooltip();
+                scheduleBlockBodyTranslation();
+            }, true);
+
+            submenu.appendChild(item);
+        }
+
+        // 2. ★新設: ブロック本文表示の日本語化 ON/OFF
+        if (!submenu.querySelector('[data-japanese-plugin="toggle-block-body-translation"]')) {
+            const bodyItem = document.createElement("div");
+            bodyItem.setAttribute("data-japanese-plugin", "toggle-block-body-translation");
+            bodyItem.className = "selection-list-plugin-menu-item";
+            Object.assign(bodyItem.style, {
+                padding: "5px 18px",
+                whiteSpace: "nowrap",
+                background: "rgb(22, 29, 30)",
+                color: blockBodyTranslationEnabled ? "#26d99e" : "#8e999b",
+                cursor: "pointer",
+                fontSize: "15px",
+                lineHeight: "1.3",
+                borderTop: "1px solid #3a4648",
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center"
+            });
+            bodyItem.textContent = blockBodyTranslationEnabled ? "ブロック表示の日本語化: ON" : "ブロック表示の日本語化: OFF";
+
+            bodyItem.addEventListener("mouseenter", () => bodyItem.style.background = "rgb(48, 60, 62)");
+            bodyItem.addEventListener("mouseleave", () => bodyItem.style.background = "rgb(22, 29, 30)");
+            bodyItem.addEventListener("click", event => {
+                event.preventDefault();
+                event.stopPropagation();
+                blockBodyTranslationEnabled = !blockBodyTranslationEnabled;
+                localStorage.setItem("japanese_plugin_block_body_enabled", String(blockBodyTranslationEnabled));
+                bodyItem.textContent = blockBodyTranslationEnabled ? "ブロック表示の日本語化: ON" : "ブロック表示の日本語化: OFF";
+                bodyItem.style.color = blockBodyTranslationEnabled ? "#26d99e" : "#8e999b";
+                scheduleBlockBodyTranslation();
+            }, true);
+
+            submenu.appendChild(bodyItem);
+        }
     }
 
     function menuItem(label, onClick) {
@@ -390,9 +573,10 @@
     // 日本語キャッシュの保存 (エクスポート) & 読込 (インポート) & ブロック一覧
     // ============================================================
     function exportBlockCacheJson() {
+        const combined = { ...flyoutTranslationCache, ...blockTextCache };
         const sorted = {};
-        Object.keys(flyoutTranslationCache).sort().forEach(k => {
-            sorted[k] = flyoutTranslationCache[k];
+        Object.keys(combined).sort().forEach(k => {
+            sorted[k] = combined[k];
         });
         const jsonText = JSON.stringify(sorted, null, 2);
         const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
@@ -424,10 +608,13 @@
                     for (const [k, v] of Object.entries(data)) {
                         if (typeof v === "string" && v.trim()) {
                             flyoutTranslationCache[normalize(k)] = v.trim();
+                            blockTextCache[normalize(k)] = v.trim();
                             count++;
                         }
                     }
                     localStorage.setItem(flyoutTranslationCacheKey, JSON.stringify(flyoutTranslationCache));
+                    localStorage.setItem(blockTextCacheKey, JSON.stringify(blockTextCache));
+                    scheduleBlockBodyTranslation();
                     alert(`日本語キャッシュ（${count}件）を正常に読み込みました！即座に反映されます。`);
                 } catch (_) {
                     alert("JSONファイルの形式が正しくありません。");
@@ -1031,6 +1218,10 @@
             return TRANSLATION_CORRECTIONS[key];
         }
 
+        if (blockTextCache[key] && hasJapanese(blockTextCache[key])) {
+            return blockTextCache[key];
+        }
+
         if (flyoutTranslationCache[key] && hasJapanese(flyoutTranslationCache[key])) {
             return flyoutTranslationCache[key];
         }
@@ -1190,6 +1381,9 @@
             for (const submenu of submenus) {
                 addTranslationToggleMenu(submenu);
                 addCacheManagementMenu(submenu);
+            }
+            if (blockBodyTranslationEnabled) {
+                scheduleBlockBodyTranslation();
             }
         } finally {
             isScanning = false;
