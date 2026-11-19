@@ -426,6 +426,25 @@
                 for (const field of fields) {
                     if (!field) continue;
 
+                    // ★追加: 変数名・サブルーチン名フィールドは翻訳から除外
+                    const fieldName = normalize(field.name).toUpperCase();
+                    const fieldCtor = normalize(field.constructor?.name).toLowerCase();
+                    if (
+                        fieldName === "VAR" ||
+                        fieldName === "VARIABLE" ||
+                        fieldName === "SUBROUTINE_NAME" ||
+                        fieldCtor.includes("variable")
+                    ) {
+                        continue;
+                    }
+
+                    // ★追加: サブルーチン定義ブロック自体の名前フィールドを除外
+                    if (block.type === "subroutineBlock" || block.type === "subroutineInstanceBlock") {
+                        if (fieldName === "SUBROUTINE_NAME" || field.EDITABLE === true) {
+                            continue;
+                        }
+                    }
+
                     // 元テキストを保存
                     if (typeof field._originalPortalText !== "string") {
                         const t = field.getText ? field.getText() : (field.getValue ? String(field.getValue()) : "");
@@ -450,7 +469,6 @@
                             if (typeof field.setText === "function") {
                                 field.setText(targetText);
                             }
-                            // SVG要素の直接反映
                             const textEl = field.textElement_ || (field.getSvgRoot ? field.getSvgRoot()?.querySelector("text") : null);
                             if (textEl) {
                                 textEl.textContent = targetText;
@@ -462,26 +480,30 @@
 
                 // 2. フィールドで取れなかった静的SVGテキストの直接走査
                 try {
-                    const rootSvg = block.getSvgRoot ? block.getSvgRoot() : null;
-                    if (rootSvg) {
-                        const textNodes = rootSvg.querySelectorAll("text.blocklyText");
-                        for (const node of textNodes) {
-                            // 入力フォームや編集中のものは除外
-                            if (node.closest(".blocklyEditableText:not([style*='pointer-events'])")) continue;
-                            if (typeof node._origSvgText !== "string") {
-                                node._origSvgText = normalize(node.textContent);
-                            }
-                            const orig = node._origSvgText;
-                            if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
+                    // ★追加: サブルーチン・変数ブロック自体なら静的SVG走査もスキップ
+                    if (block.type === "subroutineBlock" || block.type === "variableReferenceBlock") {
+                        // スキップ
+                    } else {
+                        const rootSvg = block.getSvgRoot ? block.getSvgRoot() : null;
+                        if (rootSvg) {
+                            const textNodes = rootSvg.querySelectorAll("text.blocklyText");
+                            for (const node of textNodes) {
+                                if (node.closest(".blocklyEditableText:not([style*='pointer-events'])")) continue;
+                                if (typeof node._origSvgText !== "string") {
+                                    node._origSvgText = normalize(node.textContent);
+                                }
+                                const orig = node._origSvgText;
+                                if (!orig || orig.length < 2 || /^[\d\s.,+\-*/=():;]+$/.test(orig)) continue;
 
-                            let target = orig;
-                            if (shouldTranslate) {
-                                const ja = await resolveBlockFieldText(orig);
-                                if (ja) target = ja;
-                            }
-                            if (node.textContent !== target) {
-                                node.textContent = target;
-                                blockChanged = true;
+                                let target = orig;
+                                if (shouldTranslate) {
+                                    const ja = await resolveBlockFieldText(orig);
+                                    if (ja) target = ja;
+                                }
+                                if (node.textContent !== target) {
+                                    node.textContent = target;
+                                    blockChanged = true;
+                                }
                             }
                         }
                     }
