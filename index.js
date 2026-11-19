@@ -409,6 +409,18 @@
 
             for (const block of blocks) {
                 if (!block) continue;
+
+                // ★追加: MOD関連ブロック（本体・定義）を完全に除外
+                const bType = normalize(block.type).toLowerCase();
+                if (
+                    bType.includes("mod") ||
+                    bType.startsWith("custom_") ||
+                    bType.startsWith("extension_") ||
+                    block.isModBlock === true
+                ) {
+                    continue;
+                }
+
                 let blockChanged = false;
 
                 // 1. 全フィールドを走査して書き換え
@@ -426,14 +438,16 @@
                 for (const field of fields) {
                     if (!field) continue;
 
-                    // ★追加: 変数名・サブルーチン名フィールドは翻訳から除外
+                    // ★更新: 変数・サブルーチン・MOD関連フィールドを除外
                     const fieldName = normalize(field.name).toUpperCase();
                     const fieldCtor = normalize(field.constructor?.name).toLowerCase();
                     if (
                         fieldName === "VAR" ||
                         fieldName === "VARIABLE" ||
                         fieldName === "SUBROUTINE_NAME" ||
-                        fieldCtor.includes("variable")
+                        fieldName.includes("MOD") ||
+                        fieldCtor.includes("variable") ||
+                        fieldCtor.includes("mod")
                     ) {
                         continue;
                     }
@@ -459,6 +473,14 @@
                         if (ja) targetText = ja;
                     }
 
+                    // ★追加: VALUE-0（1つ目のリスト）は枠内に収めるため省略処理
+                    if (fieldName === "VALUE-0") {
+                        const MAX_LEN = 11; // 枠内に収まる安全な文字数
+                        if (targetText.length > MAX_LEN) {
+                            targetText = targetText.slice(0, MAX_LEN - 1) + "…";
+                        }
+                    }
+
                     // 現在の表示と異なる場合のみ更新
                     const currentText = field.getText ? field.getText() : "";
                     if (currentText !== targetText) {
@@ -473,6 +495,20 @@
                             if (textEl) {
                                 textEl.textContent = targetText;
                             }
+
+                            // ★追加: VALUE-1（2つ目のリスト）に合わせてフィールド幅を再計測し、外枠を伸ばす
+                            if (fieldName === "VALUE-1" || fieldName === "VALUE") {
+                                if (typeof field.updateSize_ === "function") {
+                                    field.updateSize_();
+                                } else if (field.size_ && textEl) {
+                                    // SVGテキストの実際の長さを測ってフィールドサイズを更新
+                                    const bBox = textEl.getBBox ? textEl.getBBox() : null;
+                                    if (bBox && bBox.width > 0) {
+                                        field.size_.width = bBox.width + 16; // 余白を加えてブロック枠を伸長
+                                    }
+                                }
+                            }
+
                             blockChanged = true;
                         } catch (_) { }
                     }
