@@ -806,12 +806,14 @@
         helpObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
 
         document.addEventListener("click", event => {
-            const target = event.target?.closest?.('[role="menuitem"], button, [aria-label], li, div, span');
-            if (!target) return;
-            const text = normalize(target.innerText || target.textContent || target.getAttribute?.("aria-label") || "");
-            if (text === "Help" || text === "ヘルプ" || /ヘルプ|Help/i.test(text)) {
-                scheduleNativeHelpTranslation();
+            // ★修正：編集パネル内のクリックなら閉じない
+            if (isEditingTranslation && flyoutTooltipEl?.contains(event.target)) return;
+            if (isEditingTranslation) {
+                flyoutTooltipEl.style.pointerEvents = "none";
+                closeTranslationEditor();
+                return;
             }
+            hideFlyoutTooltip();
         }, true);
     }
 
@@ -882,6 +884,8 @@
 
     async function showFlyoutTooltip(targetElement, rawName, isWorkspace = false) {
         const tip = getOrCreateFlyoutTooltip();
+        tip._currentRawKey = normalize(rawName); 
+        tip._isWorkspace = isWorkspace; 
         flyoutTooltipTarget = targetElement;
         const targetRect = targetElement.getBoundingClientRect();
 
@@ -916,8 +920,10 @@
         }
     }
 
-    function showDirectTooltip(targetElement, text, isWorkspace = false) {
+    function showDirectTooltip(targetElement, text, isWorkspace = false, rawKey = "") {
         const tip = getOrCreateFlyoutTooltip();
+        tip._currentRawKey = normalize(rawKey);
+        tip._isWorkspace = isWorkspace;
         flyoutTooltipTarget = targetElement;
         const targetRect = targetElement.getBoundingClientRect();
 
@@ -947,6 +953,7 @@
     }
 
     function hideFlyoutTooltip() {
+        if (isEditingTranslation) return;
         if (!flyoutTooltipEl) return;
         flyoutTooltipTarget = null;
         flyoutTooltipEl.style.opacity = "0";
@@ -958,6 +965,193 @@
             }
         }, 120);
     }
+
+    // ============================================================
+    // 誤訳訂正用インライン編集UI（「N」キー起動）
+    // ============================================================
+    let isEditingTranslation = false;
+    let editPanelEl = null;
+
+    function saveCorrectedTranslation(rawKey, newJa) {
+        const key = normalize(rawKey);
+        const val = normalize(newJa);
+        if (!key || !val) return;
+
+        // 1. フライアウト／ブロック用キャッシュへ保存
+        flyoutTranslationCache[key] = val;
+        try {
+            localStorage.setItem(flyoutTranslationCacheKey, JSON.stringify(flyoutTranslationCache));
+        } catch (_) { }
+
+        // 2. ドロップダウン／イベント用キャッシュへも同期保存
+        try {
+            const eventCacheKey = "selectionListTranslationCache_v3_eventtype_camel";
+            const eventCache = JSON.parse(localStorage.getItem(eventCacheKey) || "{}");
+            eventCache[key] = val;
+            localStorage.setItem(eventCacheKey, JSON.stringify(eventCache));
+        } catch (_) { }
+
+        // 3. マスターキャッシュへも保存
+        masterTranslationCache[key] = val;
+        scheduleSaveMasterCache();
+    }
+
+    function closeTranslationEditor() {
+        isEditingTranslation = false;
+        if (editPanelEl) {
+            editPanelEl.style.display = "none";
+        }
+        hideFlyoutTooltip();
+    }
+
+    function openTranslationEditor() {
+        if (!flyoutTooltipEl || flyoutTooltipEl.style.display === "none") return;
+        const rawKey = flyoutTooltipEl._currentRawKey;
+        if (!rawKey) return;
+
+        isEditingTranslation = true;
+        // 編集操作ができるように pointerEvents を有効化
+        flyoutTooltipEl.style.pointerEvents = "auto";
+
+        if (!editPanelEl) {
+            editPanelEl = document.createElement("div");
+            Object.assign(editPanelEl.style, {
+                marginTop: "8px",
+                paddingTop: "8px",
+                borderTop: "1px solid #3a4648",
+                display: "flex",
+                flexDirection: "column",
+                gap: "6px"
+            });
+
+            const origLabel = document.createElement("div");
+            Object.assign(origLabel.style, {
+                fontSize: "11px",
+                color: "#8e999b",
+                wordBreak: "break-all"
+            });
+
+            const input = document.createElement("input");
+            input.type = "text";
+            Object.assign(input.style, {
+                width: "100%",
+                boxSizing: "border-box",
+                padding: "5px 8px",
+                fontSize: "14px",
+                color: "#ffffff",
+                background: "#161d1e",
+                border: "1px solid #61c3ff",
+                borderRadius: "4px",
+                outline: "none"
+            });
+
+            const btnRow = document.createElement("div");
+            Object.assign(btnRow.style, {
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: "6px"
+            });
+
+            const cancelBtn = document.createElement("button");
+            cancelBtn.type = "button";
+            cancelBtn.textContent = "キャンセル";
+            Object.assign(cancelBtn.style, {
+                padding: "4px 10px",
+                fontSize: "12px",
+                color: "#cfd8dc",
+                background: "#2c3739",
+                border: "1px solid #4b585c",
+                borderRadius: "4px",
+                cursor: "pointer"
+            });
+
+            const okBtn = document.createElement("button");
+            okBtn.type = "button";
+            okBtn.textContent = "OK";
+            Object.assign(okBtn.style, {
+                padding: "4px 12px",
+                fontSize: "12px",
+                fontWeight: "bold",
+                color: "#0e1416",
+                background: "#61c3ff",
+                border: "none",
+                borderRadius: "4px",
+                cursor: "pointer"
+            });
+
+            const commitEdit = () => {
+                const newVal = normalize(input.value);
+                const currentKey = editPanelEl._targetKey;
+                if (newVal && currentKey) {
+                    saveCorrectedTranslation(currentKey, newVal);
+                    flyoutTooltipEl._jaTitle.textContent = newVal;
+                }
+                flyoutTooltipEl.style.pointerEvents = "none";
+                closeTranslationEditor();
+            };
+
+            const cancelEdit = () => {
+                flyoutTooltipEl.style.pointerEvents = "none";
+                closeTranslationEditor();
+            };
+
+            okBtn.addEventListener("click", e => { e.stopPropagation(); commitEdit(); });
+            cancelBtn.addEventListener("click", e => { e.stopPropagation(); cancelEdit(); });
+
+            // 入力中のキーイベントがBlockly本体（削除やショートカット）に伝播するのを防止
+            input.addEventListener("keydown", e => {
+                e.stopPropagation();
+                if (e.key === "Enter") {
+                    e.preventDefault();
+                    commitEdit();
+                } else if (e.key === "Escape") {
+                    e.preventDefault();
+                    cancelEdit();
+                }
+            });
+
+            btnRow.appendChild(cancelBtn);
+            btnRow.appendChild(okBtn);
+            editPanelEl.appendChild(origLabel);
+            editPanelEl.appendChild(input);
+            editPanelEl.appendChild(btnRow);
+            flyoutTooltipEl.appendChild(editPanelEl);
+
+            editPanelEl._origLabel = origLabel;
+            editPanelEl._input = input;
+        }
+
+        editPanelEl._targetKey = rawKey;
+        editPanelEl._origLabel.textContent = `原文: ${rawKey}`;
+        editPanelEl._input.value = flyoutTooltipEl._jaTitle.textContent || "";
+        editPanelEl.style.display = "flex";
+
+        // 画面端からはみ出さないよう位置を再調整
+        if (flyoutTooltipTarget) {
+            positionFlyoutTooltip(flyoutTooltipTarget.getBoundingClientRect());
+        }
+
+        setTimeout(() => {
+            editPanelEl._input.focus();
+            editPanelEl._input.select();
+        }, 10);
+    }
+
+    // 「N」キー検知リスナー
+    document.addEventListener("keydown", event => {
+        if (!translationEnabled || isEditingTranslation) return;
+        // 他のテキストボックス等に入力中は無視
+        if (/^(INPUT|TEXTAREA|SELECT)$/i.test(document.activeElement?.tagName || "")) return;
+
+        if ((event.key === "n" || event.key === "N") && !event.ctrlKey && !event.altKey && !event.metaKey) {
+            if (flyoutTooltipEl && flyoutTooltipEl.style.display !== "none" && flyoutTooltipTarget) {
+                event.preventDefault();
+                event.stopPropagation();
+                openTranslationEditor();
+            }
+        }
+    }, true);
+
 
     function extractBlockLabelFromFlyoutElement(el) {
         if (!el) return "";
@@ -1148,11 +1342,11 @@
                 flyoutTooltipTarget = dropdownField;
                 const fastJa = getJListSelectCachedTranslation(rawText);
                 if (fastJa) {
-                    showDirectTooltip(dropdownField, fastJa, true);
+                    showDirectTooltip(dropdownField, fastJa, true, rawText);
                 } else {
                     resolveDropdownTranslation(rawText).then(ja => {
                         if (ja && flyoutTooltipTarget === dropdownField) {
-                            showDirectTooltip(dropdownField, ja, true);
+                            showDirectTooltip(dropdownField, ja, true, rawText);
                         }
                     });
                 }
