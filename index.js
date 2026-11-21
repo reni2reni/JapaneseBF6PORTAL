@@ -1137,20 +1137,32 @@
         }, 10);
     }
 
-    // 「N」キー検知リスナー
-    document.addEventListener("keydown", event => {
+    // 「N」キー検知リスナー（windowキャプチャ＆物理キー判定版）
+    function handleEditShortcutKey(event) {
         if (!translationEnabled || isEditingTranslation) return;
-        // 他のテキストボックス等に入力中は無視
-        if (/^(INPUT|TEXTAREA|SELECT)$/i.test(document.activeElement?.tagName || "")) return;
 
-        if ((event.key === "n" || event.key === "N") && !event.ctrlKey && !event.altKey && !event.metaKey) {
-            if (flyoutTooltipEl && flyoutTooltipEl.style.display !== "none" && flyoutTooltipTarget) {
+        // 他の入力欄にフォーカスがある時は無視
+        const activeTag = document.activeElement?.tagName || "";
+        if (/^(INPUT|TEXTAREA|SELECT)$/i.test(activeTag) || document.activeElement?.isContentEditable) {
+            return;
+        }
+
+        // 物理キー「KeyN」または文字「n/N」（全角「ｎ」「Ｎ」も含む）で判定
+        const isNKey = event.code === "KeyN" || /^[nNｎＮ]$/.test(event.key);
+
+        if (isNKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+            // ポップアップが画面に表示中かチェック
+            const isTooltipVisible = flyoutTooltipEl && flyoutTooltipEl.style.display !== "none";
+            if (isTooltipVisible) {
                 event.preventDefault();
-                event.stopPropagation();
+                event.stopImmediatePropagation();
                 openTranslationEditor();
             }
         }
-    }, true);
+    }
+
+    // document より上位の window で最優先（capture: true）キャッチする
+    window.addEventListener("keydown", handleEditShortcutKey, true);
 
 
     function extractBlockLabelFromFlyoutElement(el) {
