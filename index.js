@@ -320,6 +320,30 @@
     // ============================================================
     let translationEnabled = localStorage.getItem("selection_list_translation_enabled") !== "false";
 
+    let topRightToggleBtn = null;
+    let layoutResizeObserver = null;
+
+    function updateToggleButtonUI() {
+        if (!topRightToggleBtn) return;
+        topRightToggleBtn.dataset.enabled = translationEnabled ? "true" : "false";
+        topRightToggleBtn.title = translationEnabled
+            ? "日本語化: ON（クリックでOFF）"
+            : "日本語化: OFF（クリックでON）";
+        topRightToggleBtn.style.borderColor = translationEnabled ? "#61c3ff" : "#4b585c";
+        topRightToggleBtn.style.background = translationEnabled
+            ? "rgba(18, 38, 52, 0.92)"
+            : "rgba(22, 29, 30, 0.88)";
+        topRightToggleBtn.style.color = translationEnabled ? "#61c3ff" : "#8e999b";
+        topRightToggleBtn.style.opacity = translationEnabled ? "1" : "0.75";
+    }
+
+    function toggleTranslationEnabled() {
+        translationEnabled = !translationEnabled;
+        localStorage.setItem("selection_list_translation_enabled", String(translationEnabled));
+        updateToggleButtonUI();
+        if (!translationEnabled) hideFlyoutTooltip();
+    }
+
     function isEnabled() {
         return translationEnabled;
     }
@@ -1181,16 +1205,114 @@
         getCachedTranslation: getJListSelectCachedTranslation
     };
 
+    function getBlocklyHost() {
+        const ws = getWorkspace();
+        return ws?.getInjectionDiv?.()
+            || document.querySelector(".blocklyInjectionDiv")
+            || null;
+    }
+
+    function updateTopRightButtonPosition() {
+        if (!topRightToggleBtn) return;
+        const host = getBlocklyHost();
+        if (!host) {
+            topRightToggleBtn.style.display = "none";
+            return;
+        }
+        if (topRightToggleBtn.parentElement !== host) {
+            host.appendChild(topRightToggleBtn);
+        }
+
+        const hostRect = host.getBoundingClientRect();
+        if (hostRect.width <= 0 || hostRect.height <= 0) {
+            topRightToggleBtn.style.display = "none";
+            return;
+        }
+
+        let rightInset = 12;
+        const flyouts = [...host.querySelectorAll(".blocklyFlyout")];
+        for (const flyout of flyouts) {
+            const fRect = flyout.getBoundingClientRect();
+            const isVisible = fRect.width > 20 && fRect.height > 20 && getComputedStyle(flyout).display !== "none";
+            if (isVisible && fRect.right >= hostRect.right - 24) {
+                rightInset = Math.max(rightInset, Math.round(hostRect.right - fRect.left + 8));
+            }
+        }
+
+        topRightToggleBtn.style.display = "flex";
+        topRightToggleBtn.style.top = "10px";
+        topRightToggleBtn.style.right = `${rightInset}px`;
+        topRightToggleBtn.style.left = "auto";
+    }
+
+    function bindLayoutResizeObserver() {
+        const host = getBlocklyHost();
+        if (!host || typeof ResizeObserver === "undefined") return;
+        if (layoutResizeObserver) {
+            layoutResizeObserver.disconnect();
+        }
+        layoutResizeObserver = new ResizeObserver(() => {
+            updateTopRightButtonPosition();
+        });
+        layoutResizeObserver.observe(host);
+        host.querySelectorAll(".blocklyFlyout").forEach(el => layoutResizeObserver.observe(el));
+    }
+
+    function ensureTopRightToggleButton() {
+        const host = getBlocklyHost();
+        if (!host) return;
+
+        if (!topRightToggleBtn) {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.setAttribute("data-japanese-plugin", "top-right-toggle");
+            btn.innerHTML = `
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M4 6h10M9 4v2m3 0c-.8 3.2-2.8 6-5.8 8m1.5-3.5c1.4 1.6 3.1 2.9 5 3.7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M13.5 19l3.5-9 3.5 9m-5.8-2.5h4.6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+            `;
+            Object.assign(btn.style, {
+                position: "absolute",
+                top: "10px",
+                right: "12px",
+                zIndex: "95",
+                width: "34px",
+                height: "34px",
+                padding: "0",
+                borderRadius: "6px",
+                border: "1.5px solid #61c3ff",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                boxShadow: "0 2px 8px rgba(0, 0, 0, 0.45)",
+                transition: "background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease"
+            });
+
+            btn.addEventListener("click", event => {
+                event.preventDefault();
+                event.stopPropagation();
+                toggleTranslationEnabled();
+            }, true);
+
+            topRightToggleBtn = btn;
+            updateToggleButtonUI();
+        }
+
+        if (topRightToggleBtn.parentElement !== host) {
+            host.appendChild(topRightToggleBtn);
+        }
+        bindLayoutResizeObserver();
+    }
+    
     let isScanning = false;
     function scan() {
         if (isScanning) return;
         isScanning = true;
         try {
-            const submenus = document.querySelectorAll(".bf6-experience-manager-options-submenu");
-            for (const submenu of submenus) {
-                addTranslationToggleMenu(submenu);
-                addCacheManagementMenu(submenu);
-            }
+            ensureTopRightToggleButton();
+            updateTopRightButtonPosition();
         } finally {
             isScanning = false;
         }
@@ -1208,6 +1330,7 @@
         bindFlyoutHoverListener();
         bindNativeTooltipTranslation();
         bindDropdownHoverListener();
+        window.addEventListener("resize", updateTopRightButtonPosition, { passive: true });
         startObserver();
         scan();
     };
