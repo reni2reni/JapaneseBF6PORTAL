@@ -421,15 +421,25 @@
 
     // 既存の取得済みキャッシュ（Selection_List用・パーツ用・マスター等）からリスト和訳データを回収・統合する関数
     function collectExistingListTranslations() {
-        let addedCount = 0;
+        let changed = false;
+
+        // ★追加：すでに混入してしまった「キー自体に日本語が含まれる不要データ」を削除して掃除
+        for (const k of Object.keys(dropdownListCache)) {
+            if (hasJapanese(k)) {
+                delete dropdownListCache[k];
+                changed = true;
+            }
+        }
+
         const mergeEntry = (rawKey, rawVal) => {
             const k = normalize(rawKey);
             const v = normalize(rawVal);
-            if (!k || !v || !hasJapanese(v)) return;
-            // ブロック名キャッシュ（flyoutTranslationCache）にのみ存在する純粋なブロック名を除きたい場合はここで調整可能
+            // ★修正：キー（原文）にすでに日本語が含まれている場合は除外する
+            if (!k || !v || hasJapanese(k) || !hasJapanese(v)) return;
+
             if (!dropdownListCache[k]) {
                 dropdownListCache[k] = v;
-                addedCount++;
+                changed = true;
             }
         };
 
@@ -454,20 +464,18 @@
             }
         } catch (_) { }
 
-        // 4. マスターキャッシュ（masterTranslationCache）から単一行のリスト項目を回収
+        // 4. マスターキャッシュ（masterTranslationCache）から回収
         for (const [k, v] of Object.entries(masterTranslationCache)) {
-            // バッチ翻訳用の複数行（\nを含む）データと、純粋なブロック名（flyoutTranslationCache）を除外してリスト項目を抽出
             if (!k.includes("\n") && !flyoutTranslationCache[k]) {
                 mergeEntry(k, v);
             }
         }
 
-        if (addedCount > 0) {
+        if (changed) {
             try {
                 localStorage.setItem(dropdownListCacheKey, JSON.stringify(dropdownListCache));
             } catch (_) { }
         }
-        return addedCount;
     }
 
     // プラグイン読み込み時に既存のリスト和訳データを自動取り込み
@@ -1489,7 +1497,8 @@
             if (listItem) {
                 if (flyoutTooltipTarget === listItem) return;
                 const rawText = normalize(listItem.textContent);
-                if (!rawText || rawText.length < 1 || /^[\d\s.,+\-*/=()]+$/.test(rawText)) return;
+                // ★修正：すでに日本語が含まれている項目（hasJapanese(rawText)）は翻訳しない
+                if (!rawText || rawText.length < 1 || hasJapanese(rawText) || /^[\d\s.,+\-*/=()]+$/.test(rawText)) return;
 
                 const tip = getOrCreateFlyoutTooltip();
                 tip._isDropdownListItem = true; // リスト項目フラグON
@@ -1517,7 +1526,8 @@
             if (dropdownField) {
                 if (flyoutTooltipTarget === dropdownField) return;
                 const rawText = normalize(dropdownField.textContent);
-                if (!rawText || rawText.length < 2 || /^[\d\s.,+\-*/=()]+$/.test(rawText)) return;
+                // ★修正：すでに日本語が含まれている項目（hasJapanese(rawText)）は翻訳しない
+                if (!rawText || rawText.length < 2 || hasJapanese(rawText) || /^[\d\s.,+\-*/=()]+$/.test(rawText)) return;
 
                 const tip = getOrCreateFlyoutTooltip();
                 tip._isDropdownListItem = false; // 通常フィールド
