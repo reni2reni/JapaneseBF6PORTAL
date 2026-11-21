@@ -413,6 +413,66 @@
     }
 
     // ============================================================
+    // プルダウンリスト専用キャッシュ（保存・読込対応）
+    // ============================================================
+    const dropdownListCacheKey = "selectionListDropdownListCache_v1";
+    let dropdownListCache = {};
+    try { dropdownListCache = JSON.parse(localStorage.getItem(dropdownListCacheKey) || "{}"); } catch (_) { dropdownListCache = {}; }
+
+    function exportDropdownListCacheJson() {
+        const sorted = {};
+        Object.keys(dropdownListCache).sort().forEach(k => {
+            sorted[k] = dropdownListCache[k];
+        });
+        const jsonText = JSON.stringify(sorted, null, 2);
+        const blob = new Blob([jsonText], { type: "application/json;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "dropdown_list_translation_cache.json";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        alert(`リスト項目の日本語キャッシュ（${Object.keys(sorted).length}件）を保存しました。`);
+    }
+
+    function importDropdownListCacheJson() {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json,application/json";
+        input.style.display = "none";
+        input.onchange = e => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = ev => {
+                try {
+                    const data = JSON.parse(ev.target.result);
+                    if (!data || typeof data !== "object") throw new Error();
+                    let count = 0;
+                    for (const [k, v] of Object.entries(data)) {
+                        if (typeof v === "string" && v.trim()) {
+                            dropdownListCache[normalize(k)] = v.trim();
+                            count++;
+                        }
+                    }
+                    localStorage.setItem(dropdownListCacheKey, JSON.stringify(dropdownListCache));
+                    alert(`リスト項目の日本語キャッシュ（${count}件）を読み込みました！即座に反映されます。`);
+                } catch (_) {
+                    alert("JSONファイルの形式が正しくありません。");
+                }
+            };
+            reader.readAsText(file, "UTF-8");
+            input.remove();
+        };
+        document.body.appendChild(input);
+        input.click();
+    }
+
+
+
+    // ============================================================
     // 日本語キャッシュの保存 (エクスポート) & 読込 (インポート) & ブロック一覧
     // ============================================================
     function exportBlockCacheJson() {
@@ -680,6 +740,16 @@
                 importBlockCacheJson();
                 removeCacheSubmenu();
             }));
+            // ★ここから追加：リスト専用キャッシュの保存・読込
+            sub.appendChild(menuItem("リストキャッシュ保存 (.json)", () => {
+                exportDropdownListCacheJson();
+                removeCacheSubmenu();
+            }));
+            sub.appendChild(menuItem("リストキャッシュ読込 (.json)", () => {
+                importDropdownListCacheJson();
+                removeCacheSubmenu();
+            }));
+            // ★ここまで追加
             sub.appendChild(menuItem("ブロック一覧 (.json)", () => {
                 exportToolboxListJson();
                 removeCacheSubmenu();
@@ -981,6 +1051,14 @@
         const val = normalize(newJa);
         if (!key || !val) return;
 
+        // ★追加：リスト項目として開かれた場合はリスト専用キャッシュへ保存
+        if (flyoutTooltipEl?._isDropdownListItem) {
+            dropdownListCache[key] = val;
+            try {
+                localStorage.setItem(dropdownListCacheKey, JSON.stringify(dropdownListCache));
+            } catch (_) { }
+            return;
+        }
         // 1. フライアウト／ブロック用キャッシュへ保存
         flyoutTranslationCache[key] = val;
         try {
@@ -1349,8 +1427,33 @@
         document.addEventListener("mouseover", event => {
             if (!translationEnabled || isEditingTranslation) return;
 
-            // ※ 右クリックメニュー等の [role="menuitem"] / .blocklyMenuItem 判定は削除
+            // 1. プルダウンを開いたときのリスト内項目（.blocklyDropDownDiv 内のメニュー項目）
+            const listItem = event.target?.closest?.('.blocklyDropDownDiv .blocklyMenuItem, .blocklyDropDownDiv [role="menuitem"]');
+            if (listItem) {
+                if (flyoutTooltipTarget === listItem) return;
+                const rawText = normalize(listItem.textContent);
+                if (!rawText || rawText.length < 1 || /^[\d\s.,+\-*/=()]+$/.test(rawText)) return;
 
+                const tip = getOrCreateFlyoutTooltip();
+                tip._isDropdownListItem = true; // リスト項目フラグON
+                flyoutTooltipTarget = listItem;
+
+                const cached = dropdownListCache[rawText];
+                if (cached) {
+                    showDirectTooltip(listItem, cached, true, rawText);
+                } else {
+                    getTranslatedDropdownItem(rawText).then(ja => {
+                        if (ja && flyoutTooltipTarget === listItem) {
+                            const t = getOrCreateFlyoutTooltip();
+                            t._isDropdownListItem = true;
+                            showDirectTooltip(listItem, ja, true, rawText);
+                        }
+                    });
+                }
+                return;
+            }
+
+            // 2. ブロック上の閉じている状態のドロップダウンフィールド
             const dropdownField = event.target?.closest?.(
                 '.blocklyWorkspace g.blocklyEditableText, .blocklyFlyout g.blocklyEditableText'
             );
@@ -1359,8 +1462,11 @@
                 const rawText = normalize(dropdownField.textContent);
                 if (!rawText || rawText.length < 2 || /^[\d\s.,+\-*/=()]+$/.test(rawText)) return;
 
+                const tip = getOrCreateFlyoutTooltip();
+                tip._isDropdownListItem = false; // 通常フィールド
                 flyoutTooltipTarget = dropdownField;
-                const fastJa = getJListSelectCachedTranslation(rawText);
+
+                const fastJa = dropdownListCache[rawText] || getJListSelectCachedTranslation(rawText);
                 if (fastJa) {
                     showDirectTooltip(dropdownField, fastJa, true, rawText);
                 } else {
@@ -1374,14 +1480,22 @@
         }, true);
 
         document.addEventListener("mouseout", event => {
-            if (!flyoutTooltipTarget) return;
-            const target = event.target?.closest?.('g.blocklyEditableText');
+            if (!flyoutTooltipTarget || isEditingTranslation) return;
+            const target = event.target?.closest?.(
+                'g.blocklyEditableText, .blocklyDropDownDiv .blocklyMenuItem, .blocklyDropDownDiv [role="menuitem"]'
+            );
             if (target === flyoutTooltipTarget) {
                 hideFlyoutTooltip();
             }
         }, true);
 
-        document.addEventListener("click", () => {
+        document.addEventListener("click", event => {
+            if (isEditingTranslation && flyoutTooltipEl?.contains(event.target)) return;
+            if (isEditingTranslation) {
+                flyoutTooltipEl.style.pointerEvents = "none";
+                closeTranslationEditor();
+                return;
+            }
             hideFlyoutTooltip();
         }, true);
     }
@@ -1590,6 +1704,33 @@
         observer = new MutationObserver(scan);
         observer.observe(document.documentElement || document.body, { childList: true, subtree: true });
         scan();
+    }
+
+    async function getTranslatedDropdownItem(rawText) {
+        const key = normalize(rawText);
+        if (!key) return null;
+
+        // 1. リスト専用キャッシュを最優先で参照
+        if (dropdownListCache[key] && hasJapanese(dropdownListCache[key])) {
+            return dropdownListCache[key];
+        }
+
+        // 2. 既存キャッシュにあればリスト専用キャッシュにも取り込んで返す
+        const existing = getJListSelectCachedTranslation(key);
+        if (existing) {
+            dropdownListCache[key] = existing;
+            try { localStorage.setItem(dropdownListCacheKey, JSON.stringify(dropdownListCache)); } catch (_) { }
+            return existing;
+        }
+
+        // 3. 未翻訳なら翻訳してリスト専用キャッシュへ保存
+        const translated = await resolveDropdownTranslation(key);
+        if (translated && hasJapanese(translated)) {
+            dropdownListCache[key] = translated;
+            try { localStorage.setItem(dropdownListCacheKey, JSON.stringify(dropdownListCache)); } catch (_) { }
+            return translated;
+        }
+        return null;
     }
 
     plugin.initializeWorkspace = async function () {
