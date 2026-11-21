@@ -341,7 +341,9 @@
         translationEnabled = !translationEnabled;
         localStorage.setItem("selection_list_translation_enabled", String(translationEnabled));
         updateToggleButtonUI();
-        if (!translationEnabled) hideFlyoutTooltip();
+        if (!translationEnabled) {
+            closeTranslationEditor(); // ★修正：hideFlyoutTooltip() から変更（編集中でも確実に閉じる）
+        }
     }
 
     function isEnabled() {
@@ -883,6 +885,7 @@
     }
 
     async function showFlyoutTooltip(targetElement, rawName, isWorkspace = false) {
+        if (!translationEnabled || isEditingTranslation) return; // ★追加：編集中・OFF時は停止
         const tip = getOrCreateFlyoutTooltip();
         tip._currentRawKey = normalize(rawName); 
         tip._isWorkspace = isWorkspace; 
@@ -921,6 +924,7 @@
     }
 
     function showDirectTooltip(targetElement, text, isWorkspace = false, rawKey = "") {
+        if (!translationEnabled || isEditingTranslation) return; // ★追加：編集中・OFF時は停止
         const tip = getOrCreateFlyoutTooltip();
         tip._currentRawKey = normalize(rawKey);
         tip._isWorkspace = isWorkspace;
@@ -998,6 +1002,9 @@
 
     function closeTranslationEditor() {
         isEditingTranslation = false;
+        if (flyoutTooltipEl) {
+            flyoutTooltipEl.style.pointerEvents = "none";
+        }
         if (editPanelEl) {
             editPanelEl.style.display = "none";
         }
@@ -1005,6 +1012,7 @@
     }
 
     function openTranslationEditor() {
+        if (!translationEnabled) return; // ★追加：日本語表示OFF時は出さない
         if (!flyoutTooltipEl || flyoutTooltipEl.style.display === "none") return;
         const rawKey = flyoutTooltipEl._currentRawKey;
         if (!rawKey) return;
@@ -1183,7 +1191,7 @@
         window.__japaneseFlyoutHoverBound = true;
 
         document.addEventListener("mouseover", event => {
-            if (!translationEnabled) return;
+            if (!translationEnabled || isEditingTranslation) return;
 
             const target = event.target?.closest?.(
                 '.blocklyFlyout g.blocklyDraggable, .blocklyFlyoutScrollbar ~ svg g.blocklyDraggable, [class*="flyout" i] g.blocklyDraggable, [class*="flyout" i] [class*="block" i]'
@@ -1228,7 +1236,7 @@
         document.addEventListener("click", () => setTimeout(updateTooltipVisibility, 50), true);
 
         document.addEventListener("mouseover", event => {
-            if (!translationEnabled) return;
+            if (!translationEnabled || isEditingTranslation) return;
             const blockEl = event.target?.closest?.(".blocklyWorkspace g.blocklyDraggable");
             if (!blockEl || blockEl.closest(".blocklyFlyout")) return;
             if (flyoutTooltipTarget === blockEl) return;
@@ -1339,7 +1347,7 @@
         window.__japaneseDropdownHoverBound = true;
 
         document.addEventListener("mouseover", event => {
-            if (!translationEnabled) return;
+            if (!translationEnabled || isEditingTranslation) return;
 
             // ※ 右クリックメニュー等の [role="menuitem"] / .blocklyMenuItem 判定は削除
 
