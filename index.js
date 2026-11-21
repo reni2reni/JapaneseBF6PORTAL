@@ -1189,9 +1189,25 @@
             || null;
     }
 
+    function isElementActuallyVisible(el, hostRect) {
+        if (!el || !el.isConnected) return false;
+        const style = getComputedStyle(el);
+        if (
+            style.display === "none" ||
+            style.visibility === "hidden" ||
+            parseFloat(style.opacity) === 0
+        ) {
+            return false;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 20 || rect.height < 40) return false;
+        // 画面外に押し出されているフライアウトも非表示扱い
+        if (rect.right <= hostRect.left || rect.left >= hostRect.right) return false;
+        return true;
+    }
+
     function getBlockListRightEdge(host) {
         const hostRect = host.getBoundingClientRect();
-        // Blocklyのツールボックス（カテゴリ一覧）やフライアウトのうち、画面内に見えている要素の右端を探す
         const selectors = [
             ".blocklyToolboxDiv",
             ".blocklyFlyout",
@@ -1203,12 +1219,10 @@
         for (const sel of selectors) {
             for (const el of host.querySelectorAll(sel)) {
                 if (el === topRightToggleBtn || el.contains(topRightToggleBtn)) continue;
-                const style = getComputedStyle(el);
-                if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) continue;
+                if (!isElementActuallyVisible(el, hostRect)) continue;
 
                 const rect = el.getBoundingClientRect();
-                // 画面左側に縦長に並んでいるブロック一覧（幅が40px以上・高さ100px以上）を対象にする
-                if (rect.width >= 40 && rect.height >= 100 && rect.left < hostRect.left + hostRect.width * 0.6) {
+                if (rect.left < hostRect.left + hostRect.width * 0.6) {
                     maxRight = Math.max(maxRight, rect.right);
                 }
             }
@@ -1247,18 +1261,35 @@
         topRightToggleBtn.style.right = "auto";
     }
 
+    let layoutMutationObserver = null;
+
     function bindLayoutResizeObserver() {
         const host = getBlocklyHost();
-        if (!host || typeof ResizeObserver === "undefined") return;
-        if (layoutResizeObserver) {
-            layoutResizeObserver.disconnect();
+        if (!host) return;
+
+        if (typeof ResizeObserver !== "undefined") {
+            if (layoutResizeObserver) {
+                layoutResizeObserver.disconnect();
+            }
+            layoutResizeObserver = new ResizeObserver(() => {
+                updateTopRightButtonPosition();
+            });
+            layoutResizeObserver.observe(host);
+            host.querySelectorAll(".blocklyToolboxDiv, .blocklyFlyout").forEach(el => {
+                layoutResizeObserver.observe(el);
+            });
         }
-        layoutResizeObserver = new ResizeObserver(() => {
+
+        if (layoutMutationObserver) {
+            layoutMutationObserver.disconnect();
+        }
+        layoutMutationObserver = new MutationObserver(() => {
             updateTopRightButtonPosition();
         });
-        layoutResizeObserver.observe(host);
-        host.querySelectorAll(".blocklyToolboxDiv, .blocklyFlyout").forEach(el => {
-            layoutResizeObserver.observe(el);
+        layoutMutationObserver.observe(host, {
+            attributes: true,
+            attributeFilter: ["style", "class"],
+            subtree: true
         });
     }
 
