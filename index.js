@@ -1361,6 +1361,11 @@
         try {
             ensureTopRightToggleButton();
             updateTopRightButtonPosition();
+
+            const submenus = document.querySelectorAll(".bf6-experience-manager-options-submenu");
+            for (const submenu of submenus) {
+                addCacheManagementMenu(submenu);
+            }
         } finally {
             isScanning = false;
         }
