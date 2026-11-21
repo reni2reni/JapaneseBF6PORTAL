@@ -413,13 +413,70 @@
     }
 
     // ============================================================
-    // プルダウンリスト専用キャッシュ（保存・読込対応）
+    // プルダウンリスト専用キャッシュ（既存キャッシュ自動統合＋保存・読込）
     // ============================================================
     const dropdownListCacheKey = "selectionListDropdownListCache_v1";
     let dropdownListCache = {};
     try { dropdownListCache = JSON.parse(localStorage.getItem(dropdownListCacheKey) || "{}"); } catch (_) { dropdownListCache = {}; }
 
+    // 既存の取得済みキャッシュ（Selection_List用・パーツ用・マスター等）からリスト和訳データを回収・統合する関数
+    function collectExistingListTranslations() {
+        let addedCount = 0;
+        const mergeEntry = (rawKey, rawVal) => {
+            const k = normalize(rawKey);
+            const v = normalize(rawVal);
+            if (!k || !v || !hasJapanese(v)) return;
+            // ブロック名キャッシュ（flyoutTranslationCache）にのみ存在する純粋なブロック名を除きたい場合はここで調整可能
+            if (!dropdownListCache[k]) {
+                dropdownListCache[k] = v;
+                addedCount++;
+            }
+        };
+
+        // 1. 補正辞書（TRANSLATION_CORRECTIONS）から回収
+        for (const [k, v] of Object.entries(TRANSLATION_CORRECTIONS)) {
+            mergeEntry(k, v);
+        }
+
+        // 2. イベント・リスト項目キャッシュ（v3_eventtype_camel）から回収
+        try {
+            const eventCache = JSON.parse(localStorage.getItem("selectionListTranslationCache_v3_eventtype_camel") || "{}");
+            for (const [k, v] of Object.entries(eventCache)) {
+                mergeEntry(k, v);
+            }
+        } catch (_) { }
+
+        // 3. パーツ和訳キャッシュ（v2_parts）から回収
+        try {
+            const partsCache = JSON.parse(localStorage.getItem("selectionListTranslationCache_v2_parts") || "{}");
+            for (const [k, v] of Object.entries(partsCache)) {
+                mergeEntry(k, v);
+            }
+        } catch (_) { }
+
+        // 4. マスターキャッシュ（masterTranslationCache）から単一行のリスト項目を回収
+        for (const [k, v] of Object.entries(masterTranslationCache)) {
+            // バッチ翻訳用の複数行（\nを含む）データと、純粋なブロック名（flyoutTranslationCache）を除外してリスト項目を抽出
+            if (!k.includes("\n") && !flyoutTranslationCache[k]) {
+                mergeEntry(k, v);
+            }
+        }
+
+        if (addedCount > 0) {
+            try {
+                localStorage.setItem(dropdownListCacheKey, JSON.stringify(dropdownListCache));
+            } catch (_) { }
+        }
+        return addedCount;
+    }
+
+    // プラグイン読み込み時に既存のリスト和訳データを自動取り込み
+    collectExistingListTranslations();
+
     function exportDropdownListCacheJson() {
+        // 保存実行直前にも最新の取得済みキャッシュを再回収して統合
+        collectExistingListTranslations();
+
         const sorted = {};
         Object.keys(dropdownListCache).sort().forEach(k => {
             sorted[k] = dropdownListCache[k];
@@ -434,7 +491,7 @@
         a.click();
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
-        alert(`リスト項目の日本語キャッシュ（${Object.keys(sorted).length}件）を保存しました。`);
+        alert(`リスト項目の日本語キャッシュ（合計 ${Object.keys(sorted).length}件）を保存しました。`);
     }
 
     function importDropdownListCacheJson() {
