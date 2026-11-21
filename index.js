@@ -1135,27 +1135,7 @@
         document.addEventListener("mouseover", event => {
             if (!translationEnabled) return;
 
-            const menuItemEl = event.target?.closest?.(
-                '.blocklyDropdownMenu .blocklyMenuItem, .goog-menu .goog-menuitem, [role="menuitem"], .blocklyMenu .blocklyMenuItem'
-            );
-            if (menuItemEl) {
-                if (flyoutTooltipTarget === menuItemEl) return;
-                const rawText = normalize(menuItemEl.innerText || menuItemEl.textContent);
-                if (!rawText || rawText.length < 2 || /^[\d\s.,+\-*/=()]+$/.test(rawText)) return;
-
-                flyoutTooltipTarget = menuItemEl;
-                const fastJa = getJListSelectCachedTranslation(rawText);
-                if (fastJa) {
-                    showDirectTooltip(menuItemEl, fastJa, true);
-                } else {
-                    resolveDropdownTranslation(rawText).then(ja => {
-                        if (ja && flyoutTooltipTarget === menuItemEl) {
-                            showDirectTooltip(menuItemEl, ja, true);
-                        }
-                    });
-                }
-                return;
-            }
+            // ※ 右クリックメニュー等の [role="menuitem"] / .blocklyMenuItem 判定は削除
 
             const dropdownField = event.target?.closest?.(
                 '.blocklyWorkspace g.blocklyEditableText, .blocklyFlyout g.blocklyEditableText'
@@ -1181,9 +1161,7 @@
 
         document.addEventListener("mouseout", event => {
             if (!flyoutTooltipTarget) return;
-            const target = event.target?.closest?.(
-                '.blocklyDropdownMenu .blocklyMenuItem, .goog-menu .goog-menuitem, [role="menuitem"], .blocklyMenu .blocklyMenuItem, g.blocklyEditableText'
-            );
+            const target = event.target?.closest?.('g.blocklyEditableText');
             if (target === flyoutTooltipTarget) {
                 hideFlyoutTooltip();
             }
@@ -1193,7 +1171,6 @@
             hideFlyoutTooltip();
         }, true);
     }
-
     // ============================================================
     // Selection_List などの外部プラグイン向け連携インターフェース
     // ============================================================
@@ -1210,6 +1187,34 @@
         return ws?.getInjectionDiv?.()
             || document.querySelector(".blocklyInjectionDiv")
             || null;
+    }
+
+    function getBlockListRightEdge(host) {
+        const hostRect = host.getBoundingClientRect();
+        // Blocklyのツールボックス（カテゴリ一覧）やフライアウトのうち、画面内に見えている要素の右端を探す
+        const selectors = [
+            ".blocklyToolboxDiv",
+            ".blocklyFlyout",
+            '[class*="toolbox" i]',
+            '[class*="flyout" i]'
+        ];
+        let maxRight = 0;
+
+        for (const sel of selectors) {
+            for (const el of host.querySelectorAll(sel)) {
+                if (el === topRightToggleBtn || el.contains(topRightToggleBtn)) continue;
+                const style = getComputedStyle(el);
+                if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity) === 0) continue;
+
+                const rect = el.getBoundingClientRect();
+                // 画面左側に縦長に並んでいるブロック一覧（幅が40px以上・高さ100px以上）を対象にする
+                if (rect.width >= 40 && rect.height >= 100 && rect.left < hostRect.left + hostRect.width * 0.6) {
+                    maxRight = Math.max(maxRight, rect.right);
+                }
+            }
+        }
+
+        return maxRight > 0 ? maxRight : hostRect.left;
     }
 
     function updateTopRightButtonPosition() {
@@ -1229,20 +1234,32 @@
             return;
         }
 
-        let rightInset = 12;
-        const flyouts = [...host.querySelectorAll(".blocklyFlyout")];
-        for (const flyout of flyouts) {
-            const fRect = flyout.getBoundingClientRect();
-            const isVisible = fRect.width > 20 && fRect.height > 20 && getComputedStyle(flyout).display !== "none";
-            if (isVisible && fRect.right >= hostRect.right - 24) {
-                rightInset = Math.max(rightInset, Math.round(hostRect.right - fRect.left + 8));
-            }
-        }
+        const listRightEdge = getBlockListRightEdge(host);
+        const btnWidth = topRightToggleBtn.offsetWidth || 34;
+        // ブロック一覧の右端から 10px 右に配置（host内相対座標に変換）
+        let desiredLeft = Math.round(listRightEdge - hostRect.left + 10);
+        const maxLeft = Math.max(10, Math.round(hostRect.width - btnWidth - 10));
+        desiredLeft = Math.max(10, Math.min(maxLeft, desiredLeft));
 
         topRightToggleBtn.style.display = "flex";
         topRightToggleBtn.style.top = "10px";
-        topRightToggleBtn.style.right = `${rightInset}px`;
-        topRightToggleBtn.style.left = "auto";
+        topRightToggleBtn.style.left = `${desiredLeft}px`;
+        topRightToggleBtn.style.right = "auto";
+    }
+
+    function bindLayoutResizeObserver() {
+        const host = getBlocklyHost();
+        if (!host || typeof ResizeObserver === "undefined") return;
+        if (layoutResizeObserver) {
+            layoutResizeObserver.disconnect();
+        }
+        layoutResizeObserver = new ResizeObserver(() => {
+            updateTopRightButtonPosition();
+        });
+        layoutResizeObserver.observe(host);
+        host.querySelectorAll(".blocklyToolboxDiv, .blocklyFlyout").forEach(el => {
+            layoutResizeObserver.observe(el);
+        });
     }
 
     function bindLayoutResizeObserver() {
@@ -1305,7 +1322,7 @@
         }
         bindLayoutResizeObserver();
     }
-    
+
     let isScanning = false;
     function scan() {
         if (isScanning) return;
